@@ -2,7 +2,7 @@ name: SonarQube Scan
 
 on:
   schedule:
-    - cron: '00 07 25 2 *' 
+    - cron: '30 07 * * *' 
 
 jobs:
   sonarqube:
