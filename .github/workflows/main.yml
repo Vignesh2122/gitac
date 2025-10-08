@@ -3,6 +3,7 @@ name: Secure Build, Scan, and Deploy
 on:
   push:
     branches: [ "main" ]
+  pull_request:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -13,14 +14,15 @@ permissions:
   security-events: write
   id-token: write
 
+env:
+  SONAR_PROJECT_KEY: my-project   # replace with your SonarQube project key
+  JAVA_VERSION: '21'
+  DOCKER_IMAGE_NAME: my-app
+
 jobs:
   build-and-scan:
-    name: Build and Security Scans
+    name: Build & Security Scans
     runs-on: ubuntu-latest
-    env:
-      SONAR_PROJECT_KEY: my-project   # 🔧 replace with your actual SonarQube project key
-      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
     steps:
       - name: Checkout
@@ -31,10 +33,20 @@ jobs:
       - name: Setup JDK
         uses: actions/setup-java@v5
         with:
-          java-version: '21'
-          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
           cache: maven
 
+      # Build project
+      - name: Maven Build
+        run: mvn -B clean package -DskipTests=true
+
+      - name: Archive Build Artifacts
+        run: zip -r build-artifacts.zip target/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: build-artifacts.zip
 
       # ---- Security Scans ----
       - name: Gitleaks Secret Scan
@@ -42,32 +54,68 @@ jobs:
         with:
           args: detect --source . --no-git --report-path gitleaks-report.json --report-format json --exit-code 1
 
+      - name: Archive Gitleaks Report
+        run: zip gitleaks-report.zip gitleaks-report.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-report
+          path: gitleaks-report.zip
+
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
           languages: java
 
-      - name: Build and Package (Maven)
+      - name: Build Project for CodeQL
         run: mvn -B clean package -DskipTests=true
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
 
       - name: SonarQube Scan
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/develop'
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
           mvn -B sonar:sonar \
             -Dsonar.projectKey=${{ env.SONAR_PROJECT_KEY }} \
             -Dsonar.host.url=${{ env.SONAR_HOST_URL }} \
             -Dsonar.login=${{ env.SONAR_TOKEN }}
 
-      # ---- Notify Teams if failed ----
-      - name: Notify Teams on Failure
-        if: failure()
-        uses: jdcargile/ms-teams-notification@v1.4
+      # ---- Docker Build & Trivy Scan ----
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          github-token: ${{ github.token }}
-          ms-teams-webhook-uri: ${{ secrets.TEAMS_WEBHOOK }}
-          notification-summary: "Security Scan Failed - ${{ github.repository }}"
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build Docker Image
+        run: |
+          IMAGE_TAG=${{ github.sha }}
+          docker build -t ${{ steps.login-ecr.outputs.registry }}/${{ env.DOCKER_IMAGE_NAME }}:$IMAGE_TAG .
+
+      - name: Trivy Scan
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
+          format: 'json'
+          output: 'trivy-report.json'
+
+      - name: Archive Trivy Report
+        run: zip trivy-report.zip trivy-report.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report
+          path: trivy-report.zip
+
+  
+  
+          notification-summary: "Workflow Failed - ${{ github.repository }}"
           notification-color: dc3545
           timezone: UTC
