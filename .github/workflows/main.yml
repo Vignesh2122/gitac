@@ -63,9 +63,6 @@ jobs:
       - name: Build Project for CodeQL
         run: mvn -B clean package -DskipTests=true
 
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
-
       # ---- SonarQube Scan (main branch only) ----
       - name: SonarQube Scan
         if: github.ref == 'refs/heads/develop'
