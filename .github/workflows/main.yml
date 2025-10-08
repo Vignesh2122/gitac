@@ -1,4 +1,4 @@
-name: Secure Build, Scan, and Deploy
+name: Secure Scan Workflow
 
 on:
   push:
@@ -20,7 +20,7 @@ env:
   DOCKER_IMAGE_NAME: my-app
 
 jobs:
-  build-and-scan:
+  scan:
     name: Build & Security Scans
     runs-on: ubuntu-latest
 
@@ -37,7 +37,7 @@ jobs:
           distribution: temurin
           cache: maven
 
-      # Build project
+      # ---- Maven Build ----
       - name: Maven Build
         run: mvn -B clean package -DskipTests=true
 
@@ -48,19 +48,13 @@ jobs:
           name: build-artifacts
           path: build-artifacts.zip
 
-      # ---- Security Scans ----
+      # ---- Gitleaks Scan ----
       - name: Gitleaks Secret Scan
         uses: gitleaks/gitleaks-action@v2
         with:
           args: detect --source . --no-git --report-path gitleaks-report.json --report-format json --exit-code 1
 
-      - name: Archive Gitleaks Report
-        run: zip gitleaks-report.zip gitleaks-report.json
-      - uses: actions/upload-artifact@v4
-        with:
-          name: gitleaks-report
-          path: gitleaks-report.zip
-
+      # ---- CodeQL Scan ----
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
@@ -72,6 +66,7 @@ jobs:
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
 
+      # ---- SonarQube Scan (main branch only) ----
       - name: SonarQube Scan
         if: github.ref == 'refs/heads/develop'
         env:
@@ -83,39 +78,33 @@ jobs:
             -Dsonar.host.url=${{ env.SONAR_HOST_URL }} \
             -Dsonar.login=${{ env.SONAR_TOKEN }}
 
-      # ---- Docker Build & Trivy Scan ----
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ap-south-1
-
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
+      # ---- Docker & Trivy Scan ----
       - name: Build Docker Image
         run: |
           IMAGE_TAG=${{ github.sha }}
-          docker build -t ${{ steps.login-ecr.outputs.registry }}/${{ env.DOCKER_IMAGE_NAME }}:$IMAGE_TAG .
+          docker build -t my-app:${IMAGE_TAG} .
 
       - name: Trivy Scan
         uses: aquasecurity/trivy-action@0.20.0
         with:
-          image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
-          format: 'json'
-          output: 'trivy-report.json'
+          image-ref: my-app:${{ github.sha }}
+          format: html
+          output: trivy-report.html
 
       - name: Archive Trivy Report
-        run: zip trivy-report.zip trivy-report.json
+        run: zip trivy-report.zip trivy-report.html
       - uses: actions/upload-artifact@v4
         with:
           name: trivy-report
           path: trivy-report.zip
 
-  
-  
-          notification-summary: "Workflow Failed - ${{ github.repository }}"
+      # ---- Notify Teams on Failure ----
+      - name: Notify Teams on Failure
+        if: failure()
+        uses: jdcargile/ms-teams-notification@v1.4
+        with:
+          github-token: ${{ github.token }}
+          ms-teams-webhook-uri: ${{ secrets.TEAMS_WEBHOOK }}
+          notification-summary: "Security Scan Failed - ${{ github.repository }}"
           notification-color: dc3545
           timezone: UTC
