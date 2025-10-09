@@ -1,9 +1,8 @@
-name: Secure Scan Workflow
+name: Secure Build, Scan, and Deploy
 
 on:
-  push:
-    branches: [ "main" ]
   pull_request:
+
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -14,15 +13,17 @@ permissions:
   security-events: write
   id-token: write
 
-env:
-  SONAR_PROJECT_KEY: my-project   # replace with your SonarQube project key
-  JAVA_VERSION: '21'
-  DOCKER_IMAGE_NAME: my-app
-
 jobs:
+  # -------------------
+  # SECURITY SCANS (PR)
+  # -------------------
   scan:
-    name: Build & Security Scans
+    name: Security Scans on PR
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    env:
+      SONAR_PROJECT_KEY: my-project  # replace with your SonarQube project key
 
     steps:
       - name: Checkout
@@ -31,77 +32,48 @@ jobs:
           fetch-depth: 0
 
       - name: Setup JDK
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
-          java-version: ${{ env.JAVA_VERSION }}
-          distribution: temurin
+          java-version: '17'
+          distribution: 'temurin'
           cache: maven
 
-      # ---- Maven Build ----
-      - name: Maven Build
-        run: mvn -B clean package -DskipTests=true
+      - name: Build (without tests)
+        run: mvn clean package -DskipTests=true
 
-      - name: Archive Build Artifacts
-        run: zip -r build-artifacts.zip target/
-      - uses: actions/upload-artifact@v4
-        with:
-          name: build-artifacts
-          path: build-artifacts.zip
-
-      # ---- Gitleaks Scan ----
       - name: Gitleaks Secret Scan
         uses: gitleaks/gitleaks-action@v2
         with:
           args: detect --source . --no-git --report-path gitleaks-report.json --report-format json --exit-code 1
 
-      # ---- CodeQL Scan ----
+      # CodeQL
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
           languages: java
+          build-mode: autobuild
 
-      - name: Build Project for CodeQL
-        run: mvn -B clean package -DskipTests=true
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "java"
 
-      # ---- SonarQube Scan (main branch only) ----
+      # SonarQube PR Scan
       - name: SonarQube Scan
-        if: github.ref == 'refs/heads/develop'
+        if: github.event_name == 'push'
         env:
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         run: |
           mvn -B sonar:sonar \
             -Dsonar.projectKey=${{ env.SONAR_PROJECT_KEY }} \
-            -Dsonar.host.url=${{ env.SONAR_HOST_URL }} \
-            -Dsonar.login=${{ env.SONAR_TOKEN }}
+            -Dsonar.host.url=$SONAR_HOST_URL \
+            -Dsonar.login=$SONAR_TOKEN \
+            -Dsonar.pullrequest.key=${{ github.event.pull_request.number }} \
+            -Dsonar.pullrequest.branch=${{ github.head_ref }} \
+            -Dsonar.pullrequest.base=${{ github.base_ref }}
 
-      # ---- Docker & Trivy Scan ----
-      - name: Build Docker Image
-        run: |
-          IMAGE_TAG=${{ github.sha }}
-          docker build -t my-app:${IMAGE_TAG} .
+  
+    
 
-      - name: Trivy Scan
-        uses: aquasecurity/trivy-action@0.20.0
-        with:
-          image-ref: my-app:${{ github.sha }}
-          format: html
-          output: trivy-report.html
 
-      - name: Archive Trivy Report
-        run: zip trivy-report.zip trivy-report.html
-      - uses: actions/upload-artifact@v4
-        with:
-          name: trivy-report
-          path: trivy-report.zip
-
-      # ---- Notify Teams on Failure ----
-      - name: Notify Teams on Failure
-        if: failure()
-        uses: jdcargile/ms-teams-notification@v1.4
-        with:
-          github-token: ${{ github.token }}
-          ms-teams-webhook-uri: ${{ secrets.TEAMS_WEBHOOK }}
-          notification-summary: "Security Scan Failed - ${{ github.repository }}"
-          notification-color: dc3545
-          timezone: UTC
